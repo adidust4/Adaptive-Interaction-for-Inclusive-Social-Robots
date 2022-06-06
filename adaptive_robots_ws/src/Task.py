@@ -36,48 +36,113 @@ def getKey(settings):
 class Task1(object):
 
     def __init__(self, limb, hover_dist=0.5):
-        self.limb = limb
+        self.limb_name = limb
         self.hover_dist = hover_dist
-        '''---------------------pick and place----------------'''
+        self.limb = baxter_interface.Limb(limb)
+        self.gripper = baxter_interface.Gripper(limb)
+        ns = "ExternalTools/" + limb + "/PositionKinematicsNode/IKService"
+        self._iksvc = rospy.ServiceProxy(ns, SolvePositionIK)
+        rospy.wait_for_service(ns, 5.0)
+        self._rs = baxter_interface.RobotEnable(baxter_interface.CHECK_VERSION)
+        self._init_state = self._rs.state().enabled
+        self._rs.enable()
+
+    '''---------------------pick and place----------------'''
     def pick(self, pose):
-        pass
+        self.open_gripper()
+        self.approach()
+        self.move_servo(pose)
+        self.close_gripper()
+        self.retract()
 
     def place(self, pose, key):
+        self.approach()
+
         if key == "F":
-            pass
+            self.open_gripper()
+            self.move_servo(pose)
         else:
-            pass
-        pass
+            self.move_servo(pose)
+            self.open_gripper()
+        self.retract()
     '''-------------------------Gripper-------------------------'''
 
     def open_gripper(self):
-        pass
+        self._gripper.open()
+        rospy.sleep(1.0)
 
     def close_gripper(self):
-        pass
+        self.gripper.close()
+        rospy.sleep(1.0)
 
     def calibrate_gripper(self):
-        pass
+        self.gripper.callibrate()
     '''------------------------Movement-------------------------'''
 
-    def gaurded_move(self, pose):
-        pass
+    def gaurded_move(self, joint_angles):
+        if joint_angles:
+            self.limb.move_to_joint_positions(joint_angles)
+        else:
+            rospy.logerr("No Joint Angles Given")
 
     def move_servo(self, pose):
-        pass
+        joint_angles = self.ik_request(pose)
+        self.gaurded_move(joint_angles)
 
-    def move_to_start(self):
-        pass
+    def move_to_start(self, start_angles=None):
+        rospy.logerr("Moving to Start")
+        if not start_angles:
+            start_angles = dict(zip(self.joint_names, [0]*7))
+        self.gaurded_move(start_angles)
+        self.open_gripper()
+        rospy.sleep(1.0)
     '''--------------------Helpers----------------------------'''
 
     def ik_request(self, pose):
-        pass
+        hdr = Header(stamp=rospy.Time.now(), frame_id='base')
+        ikreq = SolvePositionIKRequest()
+        ikreq.pose_stamp.append(PoseStamped(header=hdr, pose=pose))
+        try:
+            resp = self._iksvc(ikreq)
+        except (rospy.ServiceException, rospy.ROSException), e:
+            rospy.logerr("Service call failed: %s" % (e,))
+            return False
+        # Check if result valid, and type of seed ultimately used to get solution
+        # convert rospy's string representation of uint8[]'s to int's
+        resp_seeds = struct.unpack('<%dB' % len(resp.result_type), resp.result_type)
+        limb_joints = {}
+        if (resp_seeds[0] != resp.RESULT_INVALID):
+            seed_str = {
+                ikreq.SEED_USER: 'User Provided Seed',
+                ikreq.SEED_CURRENT: 'Current Joint Angles',
+                ikreq.SEED_NS_MAP: 'Nullspace Setpoints',
+            }.get(resp_seeds[0], 'None')
+            if self._verbose:
+                limb_joints = dict(zip(resp.joints[0].name, resp.joints[0].position))
+        else:
+            rospy.logerr("INVALID POSE - No Valid Joint Solution Found.")
+            return False
+        return limb_joints
 
-    def approach(self):
-        pass
+    def approach(self, pose):
+        approach = copy(deepcopy(pose))
+        approach.position.z = approach.position.z + self.hover_dist
+        joint_angles = self.ik_request(approach)
+        self.gaurded_move(joint_angles)
 
     def retract(self):
-        pass
+        current_pose = self._limb.endpoint_pose()
+        ik_pose = Pose()
+        ik_pose.position.x = current_pose['position'].x
+        ik_pose.position.y = current_pose['position'].y
+        ik_pose.position.z = current_pose['position'].z + self._hover_distance
+        ik_pose.orientation.x = current_pose['orientation'].x
+        ik_pose.orientation.y = current_pose['orientation'].y
+        ik_pose.orientation.z = current_pose['orientation'].z
+        ik_pose.orientation.w = current_pose['orientation'].w
+        joint_angles = self.ik_request(ik_pose)
+        # servo up from current pose
+        self._guarded_move_to_joint_position(joint_angles)
 
 
 
@@ -120,15 +185,15 @@ def main():
     # This section handles picking and placing using the pose list
     # the user can update on the terminal and have a place
     # command fail
-    indx = 0
+    idx = 0
     while not rospy.is_shutdown():
         getKey()
-        print("\n Picking...")
+        rospy.logerr("Picking...")
         tsk1.pick(block_poses[idx])
         if key:
-            print("\n Placing Failure")
+            rospy.logerr("Failure")
         else:
-            print("\n Placing")
+            rospy.logerr("Placing")
         tsk1.place(block_poses[idx], key)
         idx = (idx + 1) % len(block_poses)
     return 0
